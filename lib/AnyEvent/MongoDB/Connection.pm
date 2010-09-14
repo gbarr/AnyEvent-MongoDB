@@ -123,6 +123,33 @@ sub set_fh {
   return;
 }
 
+sub op_get_more {
+  my ($self, $request_id, $request_info, $cursor_id, $page) = @_;
+
+  my $next_request_id = ++$MongoDB::Cursor::_request_id;
+  my $message         = pack(
+    "V V V V   V Z* V a8",
+    0, $next_request_id,    $request_id, 2005,        # OP_GET_MORE
+    0, $request_info->{ns}, $page,       $cursor_id
+  );
+  substr($message, 0, 4) = pack("V", length($message));
+  $self->handle->push_write($message);
+  $self->set_request_info($next_request_id, $request_info);
+}
+
+sub op_kill_cursors {
+  my ($self, $request_id, $request_info, $cursor_id) = @_;
+  my $next_request_id = ++$MongoDB::Cursor::_request_id;
+  my $message         = pack(
+    "V V V V   V V a8",
+    0, $next_request_id, $request_id, 2007,    # OP_KILL_CURSORS
+    0, 1,                $cursor_id
+  );
+  substr($message, 0, 4) = pack("V", length($message));
+  $self->handle->push_write($message);
+  $self->set_request_info($next_request_id, $request_info);
+}
+
 sub _callbacks {
   my $self = shift;
   weaken($self);
@@ -156,26 +183,24 @@ sub _callbacks {
               chunk => $blen,
               sub {
                 my $at = $request_info->{at} += $doc_count;
-                my $limit = $request_info->{limit} || 0;
-                my $todo = $limit && $limit - $at;
-                my $done = $limit && $at >= $limit;
+                my $max = $request_info->{max} || 0;
+                my $done = $max && $at >= $max;
                 my $do_prefetch = $request_info->{prefetch} && !$done && length($cursor_id);
+
+                my $page = do {
+                  my $todo = $max && $max - $at;
+                  my $p = $request_info->{limit};
+                  ($todo && $todo < $p) ? $todo : $p;
+                };
 
                 if ($request_info->{cancelled}) {
 
                   # The cursor was cancelled after we sent a prefetch OP_GET_MORE
                   # So we need to just ignore this OP_RESULT and cancel if needed
-                  if (length($cursor_id)) {
-                    my $next_request_id = ++$MongoDB::Cursor::_request_id;
-                    my $message         = pack(
-                      "V V V V   V V a8",
-                      0, $next_request_id, $request_id, 2007,    # OP_KILL_CURSORS
-                      0, 1,                $cursor_id
-                    );
-                    substr($message, 0, 4) = pack("V", length($message));
-                    $self->handle->push_write($message);
-                    $self->set_request_info($next_request_id, $request_info);
-                  }
+
+                  $self->op_kill_cursors($request_id, $request_info, $cursor_id)
+                    if length($cursor_id);
+
                   return;
                 }
 
@@ -183,39 +208,22 @@ sub _callbacks {
 
                   # User has requested prefetch, so lets send the OP_GET_MORE
                   # request before we start processing this one
-                  my $next_request_id = ++$MongoDB::Cursor::_request_id;
-                  my $message         = pack(
-                    "V V V V   V Z* V a8",
-                    0, $next_request_id,    $request_id, 2005,        # OP_GET_MORE
-                    0, $request_info->{ns}, $todo,       $cursor_id
-                  );
-                  substr($message, 0, 4) = pack("V", length($message));
-                  $self->handle->push_write($message);
-                  $self->set_request_info($next_request_id, $request_info);
+                  $self->op_get_more($request_id, $request_info, $cursor_id, $page);
                 }
 
                 my $want_more = $cb && $cb->(MongoDB::read_documents($_[1]));
 
                 if ($want_more) {
                   if (length($cursor_id) and !$done) {
-                    unless ($do_prefetch) {
-                      my $next_request_id = ++$MongoDB::Cursor::_request_id;
-                      my $message         = pack(
-                        "V V V V   V Z* V a8",
-                        0, $next_request_id,    $request_id, 2005,        # OP_GET_MORE
-                        0, $request_info->{ns}, $todo,       $cursor_id
-                      );
-                      substr($message, 0, 4) = pack("V", length($message));
-                      $self->handle->push_write($message);
-                      $self->set_request_info($next_request_id, $request_info);
-                    }
+                    $self->op_get_more($request_id, $request_info, $cursor_id, $page)
+                      unless $do_prefetch;    # already sent
                   }
-                  elsif ($limit >= 0) {
+                  elsif ($page >= 0) {
                     $cb->() if $cb;                                       # signal finished
                   }
                 }
 
-                if (length($cursor_id) and ($done or !$want_more) and $limit >= 0) {
+                if (length($cursor_id) and ($done or !$want_more)) {
                   if ($do_prefetch) {
 
                     # We have already requested the next page of results,
@@ -224,15 +232,7 @@ sub _callbacks {
                     $request_info->{cancelled} = 1;
                   }
                   else {
-                    my $next_request_id = ++$MongoDB::Cursor::_request_id;
-                    my $message         = pack(
-                      "V V V V   V V a8",
-                      0, $next_request_id, $request_id, 2007,    # OP_KILL_CURSORS
-                      0, 1,                $cursor_id
-                    );
-                    substr($message, 0, 4) = pack("V", length($message));
-                    $self->handle->push_write($message);
-                    $self->set_request_info($next_request_id, $request_info);
+                    $self->op_kill_cursors($request_id, $request_info, $cursor_id);
                   }
                 }
               }
@@ -264,20 +264,26 @@ sub op_query {
     | ($opt->{slave_okay} ? 1 << 2 : 0)          ##
     | ($opt->{immortal}   ? 1 << 4 : 0);
 
+  my $limit = $opt->{limit} || 0;
+  my $page  = $opt->{page}  || 100;
+
+  $page = $limit if $limit and $limit < $page;
+
   my ($query, $info) = MongoDB::write_query(
-    $opt->{ns}, $flags,
-    $opt->{skip}   || 0,
-    $opt->{limit}  || 0,
+    $opt->{ns},    ##
+    $flags,        ##
+    $opt->{skip} || 0,
+    $page,
     $opt->{query}  || {},
     $opt->{fields} || {}
   );
 
   # TODO: $opt->{all} - fetch all documents before calling cb, just once
-  # TODO: $opt->{batch_size}
   # TODO: $opt->{timeout}
   $info->{exhaust}  = $opt->{exhaust};                                  # TODO
   $info->{prefetch} = exists $opt->{prefetch} ? $opt->{prefetch} : 1;
   $info->{cb}       = $opt->{cb};
+  $info->{max}      = abs($limit);
 
   $self->set_request_info($info->{request_id} => $info);
 

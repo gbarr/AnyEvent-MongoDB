@@ -1,0 +1,28 @@
+* add some level of trace to help debugging
+
+* connect error handling
+
+* error handling - eg disconnect
+
+* auto-reconnect
+
+* authentication
+
+* query_timeout
+
+* multi-connection pooling
+
+* slave_ok, connect to replica slaves.
+  - is auto-upgrade to a master connection when needed the right thing todo? (see ::Database->_exec)
+
+* documentation
+
+* when using prefetch, the next page can arrive before the callback returns if enyevent loop is entered within callback. can/should we guard against it
+
+* tests
+
+* GridFS
+
+* exhaust option to op_query
+
+* op_query return guard in non-void context

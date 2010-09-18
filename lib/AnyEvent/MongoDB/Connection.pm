@@ -20,7 +20,7 @@ use namespace::autoclean;
 has mongo => (
   weak_ref => 1,
   required => 1,
-  handles  => [qw(w wtimeout timeout)],
+  handles  => [qw(w wtimeout timeout query_timeout)],
 );
 
 has host => (
@@ -123,6 +123,22 @@ sub set_fh {
   return;
 }
 
+sub send_request {
+  my ($self, $message, $request_id, $request_info) = @_;
+
+  $self->set_request_info($request_id, $request_info)
+    if $request_info;
+
+  if ($self->has_handle) {
+    $self->handle->push_write($message);
+  }
+  else {
+    $self->push_pending($message);
+  }
+
+  return;
+}
+
 sub op_get_more {
   my ($self, $request_id, $cursor_id, $request_info, $page) = @_;
 
@@ -133,8 +149,7 @@ sub op_get_more {
     0, $request_info->{ns}, $page,       $cursor_id
   );
   substr($message, 0, 4) = pack("V", length($message));
-  $self->handle->push_write($message);
-  $self->set_request_info($next_request_id, $request_info);
+  $self->send_request($message, $next_request_id, $request_info);
 }
 
 sub op_kill_cursors {
@@ -284,33 +299,30 @@ sub op_query {
   $info->{prefetch} = exists $opt->{prefetch} ? $opt->{prefetch} : 1;
   $info->{cb}       = $opt->{cb};
   $info->{max}      = abs($limit);
+  $info->{timeout}  = $opt->{timeout} || $self->query_timeout;
 
-  $self->set_request_info($info->{request_id} => $info);
-
-  if ($self->has_handle) {
-    $self->handle->push_write($query);
-  }
-  else {
-    $self->push_pending($query);
-  }
-
-  return;
+  $self->send_request($query, $info->{request_id}, $info);
 }
 
-sub _make_safe {
-  my ($self, $opt) = @_;
+sub send_safe_request {
+  my ($self, $message, $opt) = @_;
+  my ($request_id, $info);
 
-  my $last_error = Tie::IxHash->new(
-    getlasterror => 1,
-    w            => $opt->{w} || $self->w,
-    wtimeout     => $opt->{wtimeout} || $self->wtimeout
-  );
-  (my $db = $opt->{ns}) =~ s/\..*//;
-  my ($query, $info) = MongoDB::write_query($db . '.$cmd', 0, 0, -1, $last_error);
-  $info->{cb} = $opt->{cb};
+  if ($opt->{cb}) {
+    my $last_error = Tie::IxHash->new(
+      getlasterror => 1,
+      w            => $opt->{w} || $self->w,
+      wtimeout     => $opt->{wtimeout} || $self->wtimeout
+    );
+    (my $db = $opt->{ns}) =~ s/\..*//;
+    (my $query, $info) = MongoDB::write_query($db . '.$cmd', 0, 0, -1, $last_error);
+    $info->{cb} = $opt->{cb};
+    $info->{timeout} = $opt->{timeout} || $self->query_timeout;
 
-  $self->set_request_info($info->{request_id} => $info);
-  return $query;
+    $request_id = $info->{request_id};
+    $message .= $query;
+  }
+  $self->send_request($message, $request_id, $info);
 }
 
 sub op_update {
@@ -325,16 +337,7 @@ sub op_update {
     $flags,
   );
 
-  $update .= $self->_make_safe($opt) if $opt->{cb};
-
-  if ($self->has_handle) {
-    $self->handle->push_write($update);
-  }
-  else {
-    $self->push_pending($update);
-  }
-
-  return;
+  $self->send_safe_request($update, $opt);
 }
 
 sub op_insert {
@@ -342,14 +345,7 @@ sub op_insert {
 
   my ($insert, $ids) = MongoDB::write_insert($opt->{ns}, $opt->{documents});
 
-  $insert .= $self->_make_safe($opt) if $opt->{cb};
-
-  if ($self->has_handle) {
-    $self->handle->push_write($insert);
-  }
-  else {
-    $self->push_pending($insert);
-  }
+  $self->send_safe_request($insert, $opt);
 
   return $ids;
 }
@@ -359,16 +355,7 @@ sub op_delete {
 
   my ($delete) = MongoDB::write_remove($opt->{ns}, $opt->{query}, $opt->{just_one} || 0);
 
-  $delete .= $self->_make_safe($opt) if $opt->{cb};
-
-  if ($self->has_handle) {
-    $self->handle->push_write($delete);
-  }
-  else {
-    $self->push_pending($delete);
-  }
-
-  return;
+  $self->send_safe_request($delete, $opt);
 }
 
 sub authenticate {
@@ -401,7 +388,7 @@ sub authenticate {
             cb    => $cb,
           }
         );
-        }
+      },
     }
   );
 }
@@ -412,9 +399,7 @@ sub last_error {
 
   if ($opt->{cb}) {
     if ($self->has_handle) {
-      my $query = $self->_make_safe($opt);
-
-      $self->handle->push_write($query);
+      $self->send_safe_request('', $opt);
     }
     else {
       $opt->{cb}->({err => "no connection"});

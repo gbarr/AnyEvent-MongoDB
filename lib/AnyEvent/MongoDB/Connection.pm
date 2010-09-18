@@ -124,7 +124,7 @@ sub set_fh {
 }
 
 sub op_get_more {
-  my ($self, $request_id, $request_info, $cursor_id, $page) = @_;
+  my ($self, $request_id, $cursor_id, $request_info, $page) = @_;
 
   my $next_request_id = ++$MongoDB::Cursor::_request_id;
   my $message         = pack(
@@ -138,7 +138,7 @@ sub op_get_more {
 }
 
 sub op_kill_cursors {
-  my ($self, $request_id, $request_info, $cursor_id) = @_;
+  my ($self, $request_id, $cursor_id) = @_;
   my $next_request_id = ++$MongoDB::Cursor::_request_id;
   my $message         = pack(
     "V V V V   V V a8",
@@ -147,7 +147,6 @@ sub op_kill_cursors {
   );
   substr($message, 0, 4) = pack("V", length($message));
   $self->handle->push_write($message);
-  $self->set_request_info($next_request_id, $request_info);
 }
 
 sub _callbacks {
@@ -199,7 +198,7 @@ sub _callbacks {
                   # The cursor was cancelled after we sent a prefetch OP_GET_MORE
                   # So we need to just ignore this OP_RESULT and cancel if needed
 
-                  $_self->op_kill_cursors($request_id, $request_info, $cursor_id)
+                  $_self->op_kill_cursors($request_id, $cursor_id)
                     if length($cursor_id);
 
                   return;
@@ -209,14 +208,14 @@ sub _callbacks {
 
                   # User has requested prefetch, so lets send the OP_GET_MORE
                   # request before we start processing this one
-                  $_self->op_get_more($request_id, $request_info, $cursor_id, $page);
+                  $_self->op_get_more($request_id, $cursor_id, $request_info, $page);
                 }
 
                 my $want_more = $cb && $cb->(MongoDB::read_documents($_[1]));
 
                 if ($want_more) {
                   if (length($cursor_id) and !$done) {
-                    $_self->op_get_more($request_id, $request_info, $cursor_id, $page)
+                    $_self->op_get_more($request_id, $cursor_id, $request_info, $page)
                       unless $do_prefetch;    # already sent
                   }
                   elsif ($page >= 0) {
@@ -233,7 +232,7 @@ sub _callbacks {
                     $request_info->{cancelled} = 1;
                   }
                   else {
-                    $_self->op_kill_cursors($request_id, $request_info, $cursor_id);
+                    $_self->op_kill_cursors($request_id, $cursor_id);
                   }
                 }
               }

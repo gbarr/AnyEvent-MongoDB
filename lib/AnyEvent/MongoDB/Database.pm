@@ -10,6 +10,7 @@ package AnyEvent::MongoDB::Database;
 
 use Moose;
 use Digest::MD5 qw(md5_hex);
+use Scalar::Util qw(weaken);
 
 use aliased 'AnyEvent::MongoDB::Pool';
 use aliased 'AnyEvent::MongoDB::Collection';
@@ -67,7 +68,7 @@ sub authenticate {
   $pass = md5_hex("${user}:mongo:${pass}")
     unless $options{is_digest};
 
-  weaken($self);    # avoid loops
+  weaken(my $_self = $self);    # avoid loops
   $self->run_command(
     {getnonce => 1},
     sub {
@@ -77,7 +78,7 @@ sub authenticate {
         return;
       }
       my $nonce = $doc->{nonce};
-      $self->run_command(
+      $_self->run_command(
         Tie::IxHash->new(
           authenticate => 1,
           user         => $user,
@@ -86,7 +87,7 @@ sub authenticate {
         ),
         sub {
           my $doc = shift;
-          $self->mongo->save_auth($self->name, $user => $pass) if $save and $doc->{ok};
+          $_self->mongo->save_auth($_self->name, $user => $pass) if $save and $doc->{ok};
           my $cb = $options{cb};
           $cb->($doc) if $cb;
         }

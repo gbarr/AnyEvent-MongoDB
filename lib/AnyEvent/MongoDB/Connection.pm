@@ -94,13 +94,13 @@ sub connect {
 
   my $timeout_sec = $self->timeout / 1000;
 
-  weaken($self);    # avoid loops
+  weaken(my $_self = $self);    # avoid loops
   my $handle = AnyEvent::Handle->new(
     connect    => [$self->host, $self->port],
     on_connect => sub {
-      $self->connected(1);
-      my $cb = $self->on_connect;
-      $cb->($self) if $cb;
+      $_self->connected(1);
+      my $cb = $_self->on_connect;
+      $cb->($_self) if $cb;
     },
     on_prepare       => sub { return $timeout_sec },
     on_connect_error => $self->on_connect_error,
@@ -152,14 +152,15 @@ sub op_kill_cursors {
 
 sub _callbacks {
   my $self = shift;
-  weaken($self);
+
+  weaken(my $_self = $self);    # avoid loops
   return (
     on_error => $self->on_error,
     on_read  => sub {
       shift->unshift_read(
         chunk => 36,
         sub {
-          return unless $self;
+          return unless $_self;
 
           # header arrived, decode
           # We extract cursor with Z8 so that it will work correctl on 32-bit machines
@@ -173,7 +174,7 @@ sub _callbacks {
             die;    # XXX FIXME
           }
 
-          my $request_info = $self->get_request_info($response_to) || {};
+          my $request_info = $_self->get_request_info($response_to) || {};
           my $cb = $request_info->{cb};
 
           if ($blen) {
@@ -198,7 +199,7 @@ sub _callbacks {
                   # The cursor was cancelled after we sent a prefetch OP_GET_MORE
                   # So we need to just ignore this OP_RESULT and cancel if needed
 
-                  $self->op_kill_cursors($request_id, $request_info, $cursor_id)
+                  $_self->op_kill_cursors($request_id, $request_info, $cursor_id)
                     if length($cursor_id);
 
                   return;
@@ -208,14 +209,14 @@ sub _callbacks {
 
                   # User has requested prefetch, so lets send the OP_GET_MORE
                   # request before we start processing this one
-                  $self->op_get_more($request_id, $request_info, $cursor_id, $page);
+                  $_self->op_get_more($request_id, $request_info, $cursor_id, $page);
                 }
 
                 my $want_more = $cb && $cb->(MongoDB::read_documents($_[1]));
 
                 if ($want_more) {
                   if (length($cursor_id) and !$done) {
-                    $self->op_get_more($request_id, $request_info, $cursor_id, $page)
+                    $_self->op_get_more($request_id, $request_info, $cursor_id, $page)
                       unless $do_prefetch;    # already sent
                   }
                   elsif ($page >= 0) {
@@ -232,7 +233,7 @@ sub _callbacks {
                     $request_info->{cancelled} = 1;
                   }
                   else {
-                    $self->op_kill_cursors($request_id, $request_info, $cursor_id);
+                    $_self->op_kill_cursors($request_id, $request_info, $cursor_id);
                   }
                 }
               }
@@ -247,9 +248,9 @@ sub _callbacks {
       );
     },
     on_eof => sub {
-      $self->connected(0);
-      $self->clear_handle;
-      my $cb = $self->on_eof;
+      $_self->connected(0);
+      $_self->clear_handle;
+      my $cb = $_self->on_eof;
       $cb->() if $cb;
     },
 
@@ -374,7 +375,7 @@ sub op_delete {
 sub authenticate {
   my ($self, $db, $user, $pass, $cb) = @_;
 
-  weaken($self);    # avoid loops
+  weaken(my $_self = $self);    # avoid loops
   $self->op_query(
     { ns    => $db . '$cmd',
       limit => -1,
@@ -394,7 +395,7 @@ sub authenticate {
           nonce        => $result->{nonce},
           key          => $digest,
         );
-        $self->op_query(
+        $_self->op_query(
           { ns    => $db . '$cmd',
             limit => -1,
             query => $auth,

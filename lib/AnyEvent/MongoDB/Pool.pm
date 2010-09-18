@@ -39,6 +39,7 @@ sub _build__master {
   my $mongo  = $self->mongo;
   my $master = Connection->new(mongo => $mongo);
 
+  weaken(my $_self = $self);    # avoid loops
   # XXX need to handle not finding a master and connect errors
   # add support for server discovery from results
   my @connecting = map {
@@ -48,16 +49,16 @@ sub _build__master {
       mongo      => $self->mongo,
       on_connect => sub {
         my $conn = shift;
-        weaken($conn);    # avoid loops
-        $conn->op_query(
+        weaken(my $_conn = $conn);    # avoid loops
+        $_conn->op_query(
           { ns    => 'admin.$cmd',
             limit => -1,
             query => {ismaster => 1},
             cb    => sub {
               my $result = shift;
               if ($result->{ismaster}) {
-                $master->set_fh($conn->handle->fh);
-                $self->_connecting(undef);
+                $master->set_fh($_conn->handle->fh);
+                $_self->_connecting(undef);
               }
             },
           }

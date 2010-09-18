@@ -17,7 +17,6 @@ use aliased 'AnyEvent::MongoDB::Pool';
 use AnyEvent;
 use Tie::IxHash;
 use boolean;
-use Scalar::Util qw(weaken);
 
 use namespace::autoclean;
 

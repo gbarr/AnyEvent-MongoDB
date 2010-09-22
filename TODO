@@ -8,8 +8,6 @@
 
 * authentication
 
-* query_timeout
-
 * multi-connection pooling
 
 * slave_ok, connect to replica slaves.
@@ -25,4 +23,3 @@
 
 * exhaust option to op_query
 
-* op_query return guard in non-void context

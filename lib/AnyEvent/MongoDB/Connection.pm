@@ -10,6 +10,7 @@ package AnyEvent::MongoDB::Connection;
 
 use Moose;
 use AnyEvent::Handle;
+use AnyEvent::Util qw(guard);
 use Scalar::Util qw(weaken);
 use MongoDB;
 use MongoDB::Cursor;
@@ -41,22 +42,45 @@ has port => (
 has handle => (
   is        => 'rw',
   predicate => 'has_handle',
+  clearer   => 'clear_handle',
   trigger   => sub {
     my ($self, $handle) = @_;
-    if ($handle) {
 
-      # XXX what if pending are op_query with query timeout ?
-      $handle->push_write($_) for $self->pending;
-      $self->clear_pending;
+    if ($handle) {
+      $self->clear_waiting;
+      $self->flush_pending;
     }
   },
 );
 
+after clear_handle => sub {
+  my $self = shift;
+  $self->clear_pending;
+  $self->clear_request_info;
+  $self->clear_connected;
+};
+
+
 has connected => (
-  is      => 'rw',
+  is      => 'ro',
   isa     => 'Bool',
+  traits  => ['Bool'],
   default => 0,
-  clearer => 'clear_connected',
+  handles => {
+    clear_connected => 'unset',
+    set_connected   => 'set',
+  },
+);
+
+has waiting => (
+  is      => 'ro',
+  isa     => 'Bool',
+  traits  => ['Bool'],
+  default => 1,
+  handles => {
+    set_waiting   => 'set',
+    clear_waiting => 'unset',
+  }
 );
 
 has [qw/ on_connect on_connect_error on_error on_read on_eof /] => (
@@ -71,6 +95,8 @@ has pending => (
     pending       => 'elements',
     clear_pending => 'clear',
     push_pending  => 'push',
+    shift_pending => 'shift',
+    has_pending   => 'count',
   },
 );
 
@@ -80,9 +106,10 @@ has request_info => (
   traits  => ['Hash'],
   default => sub { {} },
   handles => {
-    set_request_info   => 'set',
-    get_request_info   => 'delete',
-    clear_request_info => 'clear',
+    set_request_info    => 'set',
+    get_request_info    => 'get',
+    delete_request_info => 'delete',
+    clear_request_info  => 'clear',
   },
 );
 
@@ -98,7 +125,8 @@ sub connect {
   my $handle = AnyEvent::Handle->new(
     connect    => [$self->host, $self->port],
     on_connect => sub {
-      $_self->connected(1);
+      $_self->set_connected;
+      $_self->clear_waiting;
       my $cb = $_self->on_connect;
       $cb->($_self) if $cb;
     },
@@ -123,20 +151,59 @@ sub set_fh {
   return;
 }
 
+sub flush_pending {
+  my $self = shift;
+
+  while (!$self->waiting and my $args = $self->shift_pending) {
+    $self->send_request(@$args);
+  }
+}
+
 sub send_request {
   my ($self, $message, $request_id, $request_info) = @_;
 
-  $self->set_request_info($request_id, $request_info)
-    if $request_info;
+  if ($request_info) {
+    $self->set_request_info($request_id, $request_info);
+    my $timeout = $request_info->{timeout} || 0;
+    if ($timeout > 0) {
+      weaken(my $_self = $self);    # avoid loops
+      $request_info->{guard} = AE::timer(
+        $timeout / 1000,
+        0,
+        sub {
+          if (my $rinfo = $_self->get_request_info($request_id)) {
+            delete $rinfo->{guard};
+            $rinfo->{cancelled} = 1;
+            if (my $cb = $rinfo->{cb}) {
+              $cb->({'$err' => 'query timeout'});
+            }
+          }
+        }
+      );
+    }
 
-  if ($self->has_handle) {
-    $self->handle->push_write($message);
+    $self->set_waiting if $request_info->{cb};
   }
-  else {
-    $self->push_pending($message);
-  }
+
+  $self->handle->push_write($message);
 
   return;
+}
+
+sub push_request {
+  my $self = shift;
+
+  if ($self->has_pending or $self->waiting) {
+    $self->push_pending(\@_);
+  }
+  else {
+    $self->send_request(@_);
+  }
+  my $request_info = $_[2];
+
+  return unless defined(wantarray) and $request_info;
+  my $cancel = \($request_info->{cancelled});
+  return guard { $$cancel = 1; };
 }
 
 sub op_get_more {
@@ -149,7 +216,7 @@ sub op_get_more {
     0, $request_info->{ns}, $page,       $cursor_id
   );
   substr($message, 0, 4) = pack("V", length($message));
-  $self->send_request($message, $next_request_id, $request_info);
+  $self->push_request($message, $next_request_id, $request_info);
 }
 
 sub op_kill_cursors {
@@ -177,8 +244,8 @@ sub _callbacks {
           return unless $_self;
 
           # header arrived, decode
-          # We extract cursor with Z8 so that it will work correctl on 32-bit machines
-          # using Z mean that when cursor_id is all zero it is extracted as ''
+          # We extract cursor with Z8 so that it will work correctly on 32-bit machines
+          # using Z means that when cursor_id is all zero it is extracted as ''
           # so length($cursor_id) can be used to determine if we got a cursor id
           my ($len, $request_id, $response_to, $op_code, $flags, $cursor_id, $from, $doc_count) =
             unpack "V V V V V Z8 V V", $_[1];
@@ -188,8 +255,15 @@ sub _callbacks {
             die;    # XXX FIXME
           }
 
-          my $request_info = $_self->get_request_info($response_to) || {};
-          my $cb = $request_info->{cb};
+          my $request_info = $_self->delete_request_info($response_to) || {};
+
+          # cancel timeout timer
+          delete $request_info->{guard};
+
+          my $cb = $request_info->{cb}
+            and $_self->clear_waiting;
+
+          $_self->flush_pending;
 
           if ($blen) {
 
@@ -262,7 +336,6 @@ sub _callbacks {
       );
     },
     on_eof => sub {
-      $_self->connected(0);
       $_self->clear_handle;
       my $cb = $_self->on_eof;
       $cb->() if $cb;
@@ -294,25 +367,29 @@ sub op_query {
   );
 
   # TODO: $opt->{all} - fetch all documents before calling cb, just once
-  # TODO: $opt->{timeout}
   $info->{exhaust}  = $opt->{exhaust};                                  # TODO
   $info->{prefetch} = exists $opt->{prefetch} ? $opt->{prefetch} : 1;
   $info->{cb}       = $opt->{cb};
   $info->{max}      = abs($limit);
   $info->{timeout}  = $opt->{timeout} || $self->query_timeout;
 
-  $self->send_request($query, $info->{request_id}, $info);
+  # MongoDB returns an alias to the scalar in $info hash,
+  # which means it changes the next time $MongoDB::Cursor::_request_id
+  # is incremented. but we want a copy
+  $info->{request_id} = 0 + delete $info->{request_id};
+
+  $self->push_request($query, $info->{request_id}, $info);
 }
 
-sub send_safe_request {
+sub push_safe_request {
   my ($self, $message, $opt) = @_;
   my ($request_id, $info);
 
   if ($opt->{cb}) {
     my $last_error = Tie::IxHash->new(
       getlasterror => 1,
-      w            => $opt->{w} || $self->w,
-      wtimeout     => $opt->{wtimeout} || $self->wtimeout
+      w            => int($opt->{w} || $self->w),
+      wtimeout     => int($opt->{wtimeout} || $self->wtimeout),
     );
     (my $db = $opt->{ns}) =~ s/\..*//;
     (my $query, $info) = MongoDB::write_query($db . '.$cmd', 0, 0, -1, $last_error);
@@ -322,7 +399,7 @@ sub send_safe_request {
     $request_id = $info->{request_id};
     $message .= $query;
   }
-  $self->send_request($message, $request_id, $info);
+  $self->push_request($message, $request_id, $info);
 }
 
 sub op_update {
@@ -337,7 +414,7 @@ sub op_update {
     $flags,
   );
 
-  $self->send_safe_request($update, $opt);
+  $self->push_safe_request($update, $opt);
 }
 
 sub op_insert {
@@ -345,7 +422,7 @@ sub op_insert {
 
   my ($insert, $ids) = MongoDB::write_insert($opt->{ns}, $opt->{documents});
 
-  $self->send_safe_request($insert, $opt);
+  $self->push_safe_request($insert, $opt);
 
   return $ids;
 }
@@ -355,7 +432,7 @@ sub op_delete {
 
   my ($delete) = MongoDB::write_remove($opt->{ns}, $opt->{query}, $opt->{just_one} || 0);
 
-  $self->send_safe_request($delete, $opt);
+  $self->push_safe_request($delete, $opt);
 }
 
 sub authenticate {
@@ -399,7 +476,7 @@ sub last_error {
 
   if ($opt->{cb}) {
     if ($self->has_handle) {
-      $self->send_safe_request('', $opt);
+      $self->push_safe_request('', $opt);
     }
     else {
       $opt->{cb}->({err => "no connection"});

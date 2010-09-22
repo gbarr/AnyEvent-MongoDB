@@ -56,8 +56,11 @@ sub _build__master {
             query => {ismaster => 1},
             cb    => sub {
               my $result = shift;
+              my $fh = $_conn->handle->fh;
+              $_conn->clear_request_info;
+              $_conn->clear_handle;
               if ($result->{ismaster}) {
-                $master->set_fh($_conn->handle->fh);
+                $master->set_fh($fh);
                 $_self->_connecting(undef);
               }
             },

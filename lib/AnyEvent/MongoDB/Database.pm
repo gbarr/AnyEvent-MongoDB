@@ -16,6 +16,7 @@ use aliased 'AnyEvent::MongoDB::Pool';
 use aliased 'AnyEvent::MongoDB::Collection';
 use aliased 'AnyEvent::MongoDB::Connection';
 use aliased 'AnyEvent::MongoDB::Request';
+use aliased 'AnyEvent::MongoDB::GridFS';
 
 use namespace::autoclean;
 
@@ -165,5 +166,9 @@ sub run_command {
   $self->_exec(op_query => \%options);
 }
 
+sub gridfs {
+  my $self = shift;
+  GridFS->new(@_, database => $self);
+}
 
 __PACKAGE__->meta->make_immutable;

@@ -42,8 +42,8 @@ sub find {
   my $self = shift;
 
   my %arg = (ns => $self->ns);
-  $arg{query}  = shift if ref($_[0]);
-  $arg{fields} = shift if ref($_[0]);
+  $arg{query}  = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
+  $arg{fields} = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
   $arg{cb}     = shift if ref($_[0]);
 
   my %options = (@_, %arg);
@@ -59,7 +59,7 @@ sub insert {
   my $self = shift;
 
   my %arg = (ns => $self->ns);
-  $arg{documents} = shift if ref($_[0]);
+  $arg{documents} = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
   $arg{cb}        = shift if ref($_[0]);
 
   my %options = (@_, %arg);
@@ -76,7 +76,7 @@ sub save {
   my $self = shift;
 
   my %arg = (ns => $self->ns);
-  $arg{document} = shift if ref($_[0]);
+  $arg{document} = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
   $arg{cb}       = shift if ref($_[0]);
 
   my %options = (@_, %arg);
@@ -96,8 +96,8 @@ sub update {
   my $self = shift;
 
   my %arg = (ns => $self->ns);
-  $arg{query} = shift if ref($_[0]);
-  $arg{doc}   = shift if ref($_[0]);
+  $arg{query} = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
+  $arg{doc}   = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
   $arg{cb}    = shift if ref($_[0]);
 
   my %options = (@_, %arg);
@@ -109,7 +109,7 @@ sub remove {
   my $self = shift;
 
   my %arg = (ns => $self->ns);
-  $arg{query} = shift if ref($_[0]);
+  $arg{query} = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
   $arg{cb}    = shift if ref($_[0]);
 
   my %options = (@_, %arg);
@@ -121,7 +121,7 @@ sub ensure_index {
   my $self = shift;
 
   my %arg = (ns => $self->ns);
-  $arg{key} = shift if ref($_[0]);
+  $arg{key} = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
   $arg{cb}  = shift if ref($_[0]);
 
   my %options = (@_, %arg);
@@ -191,7 +191,7 @@ sub count {
   my $self = shift;
 
   my %arg = (ns => $self->ns);
-  $arg{query} = shift if ref($_[0]);
+  $arg{query} = shift if ref($_[0]) and ref($_[0]) ne 'CODE';
   $arg{cb}    = shift if ref($_[0]);
 
   my %options = (@_, %arg);

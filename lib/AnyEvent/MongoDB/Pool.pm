@@ -16,6 +16,7 @@ use Scalar::Util qw(weaken);
 use aliased 'AnyEvent::MongoDB';
 use aliased 'AnyEvent::MongoDB::Connection';
 use aliased 'AnyEvent::MongoDB::Database';
+use aliased 'AnyEvent::MongoDB::Request';
 
 use namespace::autoclean;
 
@@ -26,20 +27,28 @@ has mongo => (
   weak_ref => 1,
 );
 
-has _master => (
-  is         => 'ro',
-  isa        => Connection,
-  lazy_build => 1,
+has master => (
+  is       => 'ro',
+  init_arg => undef,
+  writer   => '_set_master',
+  isa      => Connection,
 );
 
 has _connecting => (is => 'rw');
 
-sub _build__master {
-  my $self   = shift;
-  my $mongo  = $self->mongo;
-  my $master = Connection->new(mongo => $mongo);
+sub connect {
+  my $self     = shift;
+  my $cb = pop;
 
-  weaken(my $_self = $self);    # avoid loops
+  # XXX not really a pool right now.
+  my $master = $self->master;
+  if ($master and $master->connected) {
+    $cb->($master);
+    return;
+  }
+
+  my $mongo  = $self->mongo;
+
   # XXX need to handle not finding a master and connect errors
   # add support for server discovery from results
   my @connecting = map {
@@ -49,38 +58,32 @@ sub _build__master {
       mongo      => $self->mongo,
       on_connect => sub {
         my $conn = shift;
-        weaken(my $_conn = $conn);    # avoid loops
-        $_conn->op_query(
-          { ns    => 'admin.$cmd',
-            limit => -1,
-            query => {ismaster => 1},
-            cb    => sub {
-              my $result = shift;
-              my $fh = $_conn->handle->fh;
-              $_conn->clear_request_info;
-              $_conn->clear_handle;
-              if ($result->{ismaster}) {
-                $master->set_fh($fh);
-                $_self->_connecting(undef);
-              }
-            },
-          }
+
+        $conn->push_request(
+          Request->op_query(
+            { ns    => 'admin.$cmd',
+              limit => -1,
+              query => {ismaster => 1},
+              cb    => sub {
+                my $result = shift;
+                if ($result->{ismaster}) {
+                  $self->_set_master($conn);
+                  $cb->($conn);
+                }
+              },
+            }
+          )
         );
+        weaken($conn);    # avoid loops
       }
     )->connect;
   } $mongo->servers;
 
   $self->_connecting(\@connecting);
 
-  return $master;
-}
+  weaken($self);    # avoid loops
 
-sub connect {
-  my $self     = shift;
-  my $slave_ok = shift;
-
-  # XXX not really a pool right now.
-  return $self->_master;
+  return;
 }
 
 sub get_database {

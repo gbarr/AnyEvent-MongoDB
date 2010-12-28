@@ -15,6 +15,7 @@ use Scalar::Util qw(weaken);
 use aliased 'AnyEvent::MongoDB::Pool';
 use aliased 'AnyEvent::MongoDB::Collection';
 use aliased 'AnyEvent::MongoDB::Connection';
+use aliased 'AnyEvent::MongoDB::Request';
 
 use namespace::autoclean;
 
@@ -32,20 +33,60 @@ has name => (
 );
 
 has connection => (
-  is      => 'rw',
-  isa     => Connection,
-  clearer => 'clear_connection',
+  is        => 'rw',
+  isa       => Connection,
+  clearer   => 'clear_connection',
+);
+
+has pending => (
+  traits  => ['Array'],
+  default => sub { [] },
+  handles => {
+    shift_pending => 'shift',
+    push_pending  => 'push',
+    has_pending   => 'count',
+  },
 );
 
 sub _exec {
   my ($self, $op, $options) = @_;
 
+  $options->{safe} ||= 1
+    if $op ne 'op_query' and $options->{cb};
+
+  if ($options->{safe}) {
+    my $m = $self->mongo;
+    $options->{w}        ||= $m->w;
+    $options->{wtimeout} ||= $m->wtimeout;
+  }
+
+  $options->{timeout} = $self->mongo->query_timeout
+    if !exists $options->{timeout} and ($op eq 'op_query' or $options->{safe});
+
+  my $req = Request->$op($options);
+
+  # XXX TODO slave_ok
+
   my $conn = $self->connection;
+  if ($conn and $conn->connected) {
+    $conn->push_request($req);
+  }
+  else {
+    $self->push_pending($req);
+    if ($self->has_pending == 1) {
+      $self->pool->connect(
+        sub {
+          my $conn = shift;
+          $self->connection($conn);
+          while (my $r = $self->shift_pending) {
+            $conn->push_request($r);
+          }
+        }
+      );
+    }
+  }
 
-  $self->connection($conn = $self->pool->connect($options->{slave_ok}))
-    unless $conn and ($options->{slave_ok} or $conn->is_master);
-
-  return $conn->$op($options);
+  return $req;
 }
 
 sub get_collection {
@@ -68,7 +109,6 @@ sub authenticate {
   $pass = md5_hex("${user}:mongo:${pass}")
     unless $options{is_digest};
 
-  weaken(my $_self = $self);    # avoid loops
   $self->run_command(
     {getnonce => 1},
     sub {
@@ -78,7 +118,7 @@ sub authenticate {
         return;
       }
       my $nonce = $doc->{nonce};
-      $_self->run_command(
+      $self->run_command(
         Tie::IxHash->new(
           authenticate => 1,
           user         => $user,
@@ -87,13 +127,15 @@ sub authenticate {
         ),
         sub {
           my $doc = shift;
-          $_self->mongo->save_auth($_self->name, $user => $pass) if $save and $doc->{ok};
+          $self->mongo->save_auth($self->name, $user => $pass) if $save and $doc->{ok};
           my $cb = $options{cb};
           $cb->($doc) if $cb;
         }
       );
     }
   );
+
+  weaken(my $_self = $self);    # avoid loops
 }
 
 sub last_error {

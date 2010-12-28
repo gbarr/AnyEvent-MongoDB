@@ -170,3 +170,55 @@ sub add_auth {
 
 __PACKAGE__->meta->make_immutable;
 
+__END__
+
+=head1 NAME
+
+AnyEvent::MongoDB -- Asynchronous MongoDB client using AnyEvent
+
+=head1 SYNOPSIS
+
+  use AnyEvent::MongoDB;
+
+  my $mongo = AnyEvent::MongoDB->new(
+    uri => "mongodb:localhost:27017,localhost:27018",
+  );
+
+  my $db = $mongo->get_database('test');
+  my $col = $db->get_collection('collection');
+
+  $col->find({name => "foo"}, sub {
+      require Data::Dumper;
+      print Data::Dumper::Dumper(\@_);
+  });
+
+
+=head1 WARNINGS
+
+This is considered as alpha quality software. Most of the stuff are undocumented since it's considered
+unstable and will likely to change.
+
+=head1 DESCRIPTION
+
+C<AnyEvent::MongoDB> is a client for L<http://www.mongodb.org/|MongoDB> using L<AnyEvent>.
+
+To avoid re-implementing things it uses and introducing new bugs, it uses the BSON encode and decode
+routines from L<MongoDB>. See L<MongoDB::DataTypes> for details of how the encode and decode work
+
+=head1 SEE ALSO
+
+L<MongoDB>, L<MongoDB::DataTypes>
+
+=head1 AUTHOR
+
+Graham Barr <gbarr@pobox.com>
+
+=head1 COPYRIGHT
+
+Copyright (C) 2010 by Graham Barr.
+
+This program is free software; you can redistribute it and/or modify it under
+the same terms as Perl itself.
+
+=cut
+

@@ -13,7 +13,11 @@ ok(my $mdb = AnyEvent::MongoDB->new);
 SKIP: {
   skip("cannot connect to mongod",1);
 }
-ok(0);
+
+TODO: {
+  local $TODO = "implement tests";
+  ok(0);
+}
 
 # test auto_connect
 
